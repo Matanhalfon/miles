@@ -325,6 +325,20 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="the temperature for the inference engine during rollout.",
             )
             parser.add_argument(
+                "--rollout-temperature-min",
+                type=float,
+                default=None,
+                help="minimum temperature for linear decay; if set, rollout temperature decays "
+                "linearly from --rollout-temperature to this value over "
+                "--rollout-temperature-decay-steps rollouts.",
+            )
+            parser.add_argument(
+                "--rollout-temperature-decay-steps",
+                type=int,
+                default=500,
+                help="number of rollout steps over which temperature decays from initial to min.",
+            )
+            parser.add_argument(
                 "--rollout-top-p", type=float, default=1.0, help="the top-p for the inference engine during rollout."
             )
             parser.add_argument(

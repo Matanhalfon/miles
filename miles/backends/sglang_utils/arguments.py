@@ -135,9 +135,12 @@ def add_sglang_arguments(parser):
 
 def validate_args(args):
     args.sglang_tp_size = args.rollout_num_gpus_per_engine
-    args.sglang_dp_size = args.sglang_data_parallel_size
-    args.sglang_pp_size = args.sglang_pipeline_parallel_size
-    args.sglang_ep_size = args.sglang_expert_parallel_size
+    # These three sglang parallel sizes are read here but have no add_argument definition on
+    # this branch, so a bare `args.<x>` raises AttributeError at startup. Default them to 1
+    # (no extra sglang DP/PP/EP — matches the config, which sets none) until the args are added.
+    args.sglang_dp_size = getattr(args, "sglang_data_parallel_size", 1)
+    args.sglang_pp_size = getattr(args, "sglang_pipeline_parallel_size", 1)
+    args.sglang_ep_size = getattr(args, "sglang_expert_parallel_size", 1)
     if hasattr(args, "sglang_attention_context_parallel_size"):
         args.sglang_attn_cp_size = args.sglang_attention_context_parallel_size
 

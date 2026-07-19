@@ -495,7 +495,31 @@ def load_lora_adapter(
                     loaded += 1
         logger.info(f"Loaded {loaded} adapter tensors from Megatron-native checkpoint: {native_path}")
 
-        iteration = _load_training_state(adapter_dir, optimizer, opt_param_scheduler)
+        # FRESH-OPTIMIZER resume (default): restore only the adapter WEIGHTS, and start the
+        # optimizer + LR schedule fresh (warmup from step 0). The saved training_state holds no
+        # real Adam moments — Megatron's DistributedOptimizer.state_dict() doesn't capture the
+        # sharded fp32 master/moments — so "restoring" it only reinstates step=250 + a mid-cosine
+        # LR with NO warmup, then takes a full-strength Adam step on COLD moments → step-1 grad_norm
+        # nan → collapse (observed on every --lora-adapter-path resume). A fresh optimizer with
+        # warmup is exactly the regime the proven-stable fresh runs use. Set
+        # MILES_RESUME_RESTORE_OPT=1 to opt back into the (broken) optimizer-state restore.
+        restore_opt = os.environ.get("MILES_RESUME_RESTORE_OPT", "").strip() in ("1", "true", "True")
+        if restore_opt:
+            iteration = _load_training_state(adapter_dir, optimizer, opt_param_scheduler)
+        else:
+            iteration = None
+            logger.info("Fresh-optimizer resume: loaded adapter weights only; optimizer + LR "
+                        "schedule start fresh (warmup from step 0). Set MILES_RESUME_RESTORE_OPT=1 "
+                        "to restore saved optimizer state instead.")
+
+        # Resync the distributed optimizer's fp32 master copies from the just-loaded adapter. The
+        # master copies were built at construction time from the fresh (random-A / zero-B) adapter;
+        # without this, the first optimizer.step() writes master->model and reverts the adapter.
+        # (No-op safe when optimizer is None.)
+        if optimizer is not None:
+            optimizer.reload_model_params()
+            logger.info("Resynced optimizer fp32 master weights from loaded LoRA adapter")
+
         return True, iteration
 
     # ---- HF PEFT format (future work) ----

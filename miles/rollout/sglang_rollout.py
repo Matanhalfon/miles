@@ -405,6 +405,18 @@ async def generate_rollout_async(
 
     state = GenerateState(args)
 
+    # Linear rollout-temperature decay (re-added 2026-07-09): restores the reference 35B
+    # anneal (e.g. 1.1 -> 0.75 over 300 rollouts). No-op unless --rollout-temperature-min is
+    # set. T = max(T_min, T_start - (T_start - T_min) * rollout_id / decay_steps). GenerateState
+    # is a singleton, so updating its sampling_params here re-scopes temperature per rollout.
+    if getattr(args, "rollout_temperature_min", None) is not None:
+        t_start = args.rollout_temperature
+        t_min = args.rollout_temperature_min
+        decay_steps = max(getattr(args, "rollout_temperature_decay_steps", 500) or 500, 1)
+        current_temp = max(t_min, t_start - (t_start - t_min) * rollout_id / decay_steps)
+        state.sampling_params["temperature"] = current_temp
+        logger.info("Rollout temperature decay: rollout_id=%d temperature=%.4f", rollout_id, current_temp)
+
     # instantiate data filters
     dynamic_filter = (
         load_function(args.dynamic_sampling_filter_path) if args.dynamic_sampling_filter_path is not None else None

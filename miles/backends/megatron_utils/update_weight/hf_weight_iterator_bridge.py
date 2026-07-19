@@ -166,7 +166,11 @@ def _process_conversion_tasks(vanilla_conversion_tasks, new_weight_dict):
 class _MapWithLen:
     def __init__(self, fn, xs):
         self.fn = fn
-        self.xs = xs
+        # Drop unmapped (None) conversion tasks. The megatron.bridge exporter yields None for
+        # megatron params it has no HF mapping for — on Qwen3.6 that's the MTP (multi-token
+        # prediction) layer's experts/shared_experts, which the SGLang rollout does not use.
+        # Filtering here avoids dereferencing None in _handle_one and keeps __len__ consistent.
+        self.xs = [x for x in xs if x is not None]
 
     def __len__(self):
         return len(self.xs)

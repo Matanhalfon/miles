@@ -16,7 +16,17 @@ class TrainProfiler:
         self._torch_profiler_overall = None
         self._memory_profiler_overall = None
 
-        if args.use_pytorch_profiler and ("train_overall" in args.profile_target):
+        # Only build the profiler on the requested ranks (--profile-ranks). Without this gate
+        # ALL trainer ranks run torch.profiler with with_stack+profile_memory (~110GB host RAM
+        # each) → node host-OOM (Ray killed the 35B profiling run at rollout 5, 2026-07-09).
+        # Rank 0 alone yields the full trace and fits comfortably.
+        _prof_ranks = getattr(args, "profile_ranks", None) or [0]
+        _this_rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        if (
+            args.use_pytorch_profiler
+            and ("train_overall" in args.profile_target)
+            and (_this_rank in _prof_ranks)
+        ):
             self._torch_profiler_overall = _create_torch_profiler(args, name="train_overall")
 
         if args.record_memory_history and ("train_overall" in args.profile_target):
@@ -71,10 +81,15 @@ def _create_torch_profiler(args, name):
             worker_name=f"{name}_rank_{torch.distributed.get_rank()}",
             use_gzip=True,
         ),
-        record_shapes=True,
-        with_stack=True,
-        profile_memory=True,
-        with_flops=True,
+        # Trace-size control (node-local patch). with_stack + profile_memory are the size-bombs:
+        # they ballooned this profiler to ~10GB/rank → ~110GB host RAM → Ray OOM-killed the run
+        # mid-export → truncated/corrupt .gz (train_overall_rank_0…, 2026-07-09). Default them OFF
+        # so the trace stays a few hundred MB (timeline + shapes + flops), which completes AND opens.
+        # Flip on per-run via config (profile.with_stack / profile.profile_memory) for a 1-step deep dive.
+        record_shapes=getattr(args, "profile_record_shapes", True),
+        with_stack=getattr(args, "profile_with_stack", False),
+        profile_memory=getattr(args, "profile_profile_memory", False),
+        with_flops=getattr(args, "profile_with_flops", True),
     )
 
 

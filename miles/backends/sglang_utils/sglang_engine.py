@@ -25,6 +25,19 @@ from miles.utils.http_utils import get_host_info
 
 logger = logging.getLogger(__name__)
 
+# Fail-fast timeout (seconds) for SGLang control-plane RPCs (weight-sync begin/end,
+# LoRA unload/load, update_weights_from_distributed, etc.). These are normally
+# sub-second; a hang here (e.g. a wedged NCCL broadcast handshake during LoRA sync)
+# otherwise blocks the calling rank forever, so its peers die on the 30-min gloo
+# barrier timeout with only an opaque `gloo recv timed out` error. A finite timeout
+# well under the gloo default (1800s) makes the real culprit raise first, fast, and
+# with a clear message. Tune via MILES_SGLANG_RPC_TIMEOUT_SEC (0/empty = no timeout).
+def _rpc_timeout() -> float | None:
+    raw = os.environ.get("MILES_SGLANG_RPC_TIMEOUT_SEC", "600").strip()
+    if not raw or raw == "0":
+        return None
+    return float(raw)
+
 
 def get_base_gpu_id(args, rank):
     num_gpus = min(args.num_gpus_per_node, args.rollout_num_gpus_per_engine)
@@ -254,7 +267,17 @@ class SGLangEngine(RayActor):
             return
 
         url = f"http://{self.server_host}:{self.server_port}/{endpoint}"
-        response = requests.post(url, json=payload or {})
+        try:
+            response = requests.post(url, json=payload or {}, timeout=_rpc_timeout())
+        except requests.exceptions.Timeout as e:
+            # A control-plane RPC wedged server-side (e.g. LoRA sync NCCL-broadcast
+            # handshake). Raise now, fast, with the endpoint named — instead of letting
+            # this rank block forever and its peers die on the opaque 30-min gloo barrier.
+            raise RuntimeError(
+                f"SGLang RPC '{endpoint}' to {url} timed out after "
+                f"{_rpc_timeout()}s (server-side hang). Set MILES_SGLANG_RPC_TIMEOUT_SEC "
+                f"to tune, or 0 to disable."
+            ) from e
         try:
             response.raise_for_status()
         except requests.exceptions.HTTPError as e:
@@ -562,8 +585,10 @@ class SGLangEngine(RayActor):
         return response
 
     def begin_weight_update(self):
-        """Open a weight-update session on the engine (restores packed weights for loading)."""
-        return self._make_request("begin_weight_update", {})
+        """Open a weight-update session on the engine (restores packed weights for loading).
+        selector="all" restores every packed tensor to a loadable state — required on this
+        SGLang build for the bf16 non-colocate path (an empty selector left base weights packed)."""
+        return self._make_request("begin_weight_update", {"selector": "all"})
 
     def end_weight_update(self):
         """Close the weight-update session (post-load + quant post-process on the full model)."""
@@ -698,8 +723,26 @@ def _compute_server_args(
         kwargs["max_lora_rank"] = max(getattr(args, "lora_rank", 0), 1)
         kwargs["lora_target_modules"] = convert_target_modules_to_hf(args.target_modules)
 
-        if args.lora_adapter_path is not None:
+        # A local checkpoint path cannot be loaded by SGLang's startup LoRA loader:
+        # it goes through huggingface_hub, which rejects filesystem paths
+        # ("Repo id must be in the form 'repo_name'...") and SIGQUITs the engine,
+        # killing the whole job. This is the documented resume breakage. We detect a
+        # local path via os.path.isabs() -- a filesystem resume path is always
+        # absolute (/tmp/...), while an HF repo id never is (namespace/repo). This is
+        # node-independent (unlike os.path.isdir, which is false on nodes where the
+        # checkpoint disk isn't mounted -> the SGLang engine on such a node would
+        # still try the HF load and crash). The trainer restores this adapter
+        # (checkpoint.load_lora_adapter), and train.py syncs it into SGLang via
+        # update_weights() before the first generation, so starting SGLang with
+        # random LoRA weights here is safe for local-path resumes.
+        if args.lora_adapter_path is not None and not os.path.isabs(args.lora_adapter_path):
             kwargs["lora_paths"] = {LORA_ADAPTER_NAME: args.lora_adapter_path}
+        elif args.lora_adapter_path is not None:
+            logger.info(
+                f"lora_adapter_path '{args.lora_adapter_path}' is a local filesystem path; "
+                "skipping SGLang startup load (HF repo-id only). The trainer restores it "
+                "and update_weights() syncs it into SGLang before the first rollout."
+            )
         else:
             logger.info("No pre-trained LoRA adapter_path provided, will use random initial weights")
 

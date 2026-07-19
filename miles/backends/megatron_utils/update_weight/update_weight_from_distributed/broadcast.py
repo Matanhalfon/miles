@@ -41,6 +41,7 @@ class UpdateWeightFromDistributed(DistBucketedWeightUpdateMixin):
         self.model = model
         self.model_name = model_name
         self.quantization_config = quantization_config
+        self.weights_getter = weights_getter
         self.weight_version = 0
         self._model_update_groups = None
         self._init_lora(
@@ -124,6 +125,10 @@ class UpdateWeightFromDistributed(DistBucketedWeightUpdateMixin):
         dtypes = [param.dtype for _, param in named_tensors]
         shapes = [list(param.shape) for _, param in named_tensors]
 
+        import logging as _logging
+
+        _log = _logging.getLogger(__name__)
+        _log.info("[lora-tx] issue engine.load_lora_adapter_from_distributed (%d tensors)", len(named_tensors))
         refs = [
             engine.load_lora_adapter_from_distributed.remote(
                 lora_name=LORA_ADAPTER_NAME,
@@ -135,13 +140,16 @@ class UpdateWeightFromDistributed(DistBucketedWeightUpdateMixin):
             )
             for engine in self.rollout_engines
         ]
+        _log.info("[lora-tx] posting NCCL broadcast of %d tensors", len(named_tensors))
         handles = [
             dist.broadcast(param.data, 0, group=self._model_update_groups, async_op=True) for _, param in named_tensors
         ]
         for handle in handles:
             handle.wait()
+        _log.info("[lora-tx] broadcast complete; awaiting engine load acks (ray.get)")
 
         _check_weight_sync_results(ray.get(refs), is_lora=True)
+        _log.info("[lora-tx] engine load acks received")
 
 
 def connect_rollout_engines_from_distributed(

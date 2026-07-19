@@ -70,7 +70,14 @@ def init(args):
     set_parallel_state(create_megatron_parallel_state())
 
     # https://github.com/NVIDIA/Megatron-LM/issues/1563
-    assert np.__version__.startswith("1."), "Megatron does not support numpy 2.x"
+    # Relaxed from a hard assert: this env's Megatron-LM build runs fine under numpy 2.x
+    # (verified end-to-end — full 35B load + weight sync on numpy 2.3.5). Warn instead of abort.
+    if not np.__version__.startswith("1."):
+        import logging
+
+        logging.getLogger(__name__).warning(
+            f"Megatron running under numpy {np.__version__} (>=2.x); hard assert relaxed to a warning."
+        )
 
     # Random seeds for reproducibility.
     if args.rank == 0:
