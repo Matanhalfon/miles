@@ -246,3 +246,8 @@ try:
     from . import nemotron_h  # noqa: F401
 except Exception as _e:  # pragma: no cover - defensive
     logger.warning("miles nemotron_h plugin failed to load: %s", _e)
+
+try:
+    from . import glm4moe_lite  # noqa: F401  (GLM-4.7-Flash bridge for LoRA)
+except Exception as _e:  # pragma: no cover - defensive
+    logger.warning("miles glm4moe_lite plugin failed to load: %s", _e)
